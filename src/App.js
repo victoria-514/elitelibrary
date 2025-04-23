@@ -1,6 +1,12 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
+import { db } from "./firebase";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  setDoc,
+} from "firebase/firestore";
 
-const TOTAL_SEATS = 80;
 const ROOM_LAYOUTS = {
   1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
   2: [12, 13, 14, 15, 16, 17, 18, 19],
@@ -14,22 +20,28 @@ const ROOM_LAYOUTS = {
   10: [75, 76, 77, 78, 79, 80],
 };
 
-const initSeats = Array.from({ length: TOTAL_SEATS }, (_, i) => ({
-  id: i + 1,
-  room: Object.entries(ROOM_LAYOUTS).find(([_, list]) => list.includes(i + 1))[0],
+const defaultSeat = (id) => ({
+  id,
   name: "",
   affiliation: "",
   entry: "",
   exit: "",
   contact: "",
   guardian: "",
-  status: "", // "in" or "out"
-}));
+  status: "",
+});
 
 function Seat({ seat, onClick, onStatusChange }) {
   const today = new Date();
+ const isNearExit = () => {
+  if (!seat.exit) return false;
+  const today = new Date();
   const exitDate = new Date(seat.exit);
-  const isNearExit = seat.exit && Math.ceil((exitDate - today) / (1000 * 60 * 60 * 24)) === 2;
+  const diffTime = exitDate - today;
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  return diffDays <= 2 && diffDays >= 0;  // 이틀 전부터 퇴실일까지
+};
+
 
   const getColor = () => {
     if (seat.status === "in") return "#ffd580";
@@ -41,8 +53,8 @@ function Seat({ seat, onClick, onStatusChange }) {
     <div
       onClick={() => onClick(seat)}
       style={{
-        width: "120px",
-        height: "110px",
+        width: 120,
+        height: 110,
         border: "1px solid gray",
         backgroundColor: getColor(),
         display: "flex",
@@ -50,13 +62,12 @@ function Seat({ seat, onClick, onStatusChange }) {
         justifyContent: "center",
         alignItems: "center",
         position: "relative",
-        boxSizing: "border-box",
         padding: 4,
+        boxSizing: "border-box",
         cursor: "pointer",
-        fontSize: 14,
       }}
     >
-      {isNearExit && (
+      {isNearExit() && (
         <div style={{ position: "absolute", top: 2, right: 4, color: "red" }}>★</div>
       )}
       <div>{seat.id}번</div>
@@ -65,8 +76,8 @@ function Seat({ seat, onClick, onStatusChange }) {
       <select
         value={seat.status}
         onChange={(e) => onStatusChange(seat.id, e.target.value)}
-        style={{ fontSize: 12, marginTop: 4 }}
         onClick={(e) => e.stopPropagation()}
+        style={{ fontSize: 12, marginTop: 4 }}
       >
         <option value="">-</option>
         <option value="in">입실</option>
@@ -77,7 +88,7 @@ function Seat({ seat, onClick, onStatusChange }) {
 }
 
 export default function App() {
-  const [seats, setSeats] = useState(initSeats);
+  const [seats, setSeats] = useState([]);
   const [selectedSeat, setSelectedSeat] = useState(null);
   const [form, setForm] = useState({
     name: "",
@@ -88,96 +99,64 @@ export default function App() {
     guardian: "",
   });
 
-  // localStorage 저장/불러오기
   useEffect(() => {
-    const saved = localStorage.getItem("reading-room-seats");
-    if (saved) {
-      setSeats(JSON.parse(saved));
-    }
-  }, []);
+ 
+    const unsub = onSnapshot(collection(db, "seats"), (snapshot) => {
+      const newSeats = [];
+      snapshot.forEach((doc) => newSeats.push(doc.data()));
+      setSeats(newSeats);
+    });
 
-  useEffect(() => {
-    localStorage.setItem("reading-room-seats", JSON.stringify(seats));
-  }, [seats]);
+    return () => unsub();
+  }, []);
 
   const handleSeatClick = (seat) => {
     setSelectedSeat(seat);
     setForm({
-      name: seat.name,
-      affiliation: seat.affiliation,
-      entry: seat.entry,
-      exit: seat.exit,
-      contact: seat.contact,
-      guardian: seat.guardian,
+      name: seat.name || "",
+      affiliation: seat.affiliation || "",
+      entry: seat.entry || "",
+      exit: seat.exit || "",
+      contact: seat.contact || "",
+      guardian: seat.guardian || "",
     });
   };
 
-  const handleSave = () => {
-    setSeats((prev) =>
-      prev.map((s) => (s.id === selectedSeat.id ? { ...s, ...form } : s))
-    );
+  const handleSave = async () => {
+    const updatedSeat = { ...selectedSeat, ...form };
+    await setDoc(doc(db, "seats", String(updatedSeat.id)), updatedSeat);
     setSelectedSeat(null);
   };
 
-  const handleStatusChange = (id, status) => {
-    setSeats((prev) => prev.map((s) => (s.id === id ? { ...s, status } : s)));
+  const handleStatusChange = async (id, newStatus) => {
+    const seat = seats.find((s) => s.id === id);
+    if (seat) {
+      await setDoc(doc(db, "seats", String(id)), { ...seat, status: newStatus });
+    }
   };
-
-  const getRoomLabel = (seatId) => {
-    return Object.entries(ROOM_LAYOUTS).find(([_, ids]) => ids.includes(seatId))?.[0];
-  };
-
-  const rows = [];
-  for (let i = 0; i < seats.length; i += 10) {
-    rows.push(seats.slice(i, i + 10));
-  }
-
-  let lastRoomShown = "";
 
   return (
     <div style={{ padding: 20 }}>
       <h1>독서실 좌석 관리</h1>
-
-      {rows.map((rowSeats, rowIndex) => {
-        const firstSeat = rowSeats[0];
-        const roomLabel = getRoomLabel(firstSeat.id);
-        const showRoomLabel = roomLabel !== lastRoomShown;
-        lastRoomShown = roomLabel;
-
-        return (
-          <div key={rowIndex} style={{ marginBottom: 30 }}>
-            <div style={{ display: "flex", gap: 10 }}>
-              {rowSeats.map((seat) => {
-                const room = getRoomLabel(seat.id);
-                const isRoomStart = ROOM_LAYOUTS[room]?.[0] === seat.id;
-
-                return (
-                  <div key={seat.id} style={{ marginRight: 10, position: "relative" }}>
-                    {isRoomStart && (
-                      <div style={{
-                        position: "absolute",
-                        top: -24,
-                        width: "100%",
-                        textAlign: "center",
-                        fontWeight: "bold"
-                      }}>
-                        {room}열람실
-                      </div>
-                    )}
-                    <Seat
-                      seat={seat}
-                      onClick={handleSeatClick}
-                      onStatusChange={handleStatusChange}
-                    />
-                  </div>
-                );
-              })}
-            </div>
+      {Object.entries(ROOM_LAYOUTS).map(([roomId, seatIds]) => (
+        <div key={roomId} style={{ marginBottom: 20 }}>
+          <div style={{ marginBottom: 6, fontWeight: "bold" }}>{roomId}열람실</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {seatIds.map((seatId) => {
+              const seat = seats.find((s) => s.id === seatId) || defaultSeat(seatId);
+              return (
+                <Seat
+                  key={seat.id}
+                  seat={seat}
+                  onClick={handleSeatClick}
+                  onStatusChange={handleStatusChange}
+                />
+              );
+            })}
           </div>
-        );
-      })}
+        </div>
+      ))}
 
-      {/* 사용자 정보 입력 모달 */}
       {selectedSeat && (
         <div
           style={{
@@ -190,46 +169,16 @@ export default function App() {
             display: "flex",
             justifyContent: "center",
             alignItems: "center",
-            zIndex: 10,
           }}
         >
-          <div
-            style={{
-              background: "white",
-              padding: "20px 24px",
-              width: 300,
-              boxSizing: "border-box",
-            }}
-          >
+          <div style={{ background: "white", padding: 20, width: 300 }}>
             <h3>{selectedSeat.id}번 좌석</h3>
-            {Object.entries(form).map(([key, value]) => (
-              <input
-                key={key}
-                value={value}
-                onChange={(e) => setForm({ ...form, [key]: e.target.value })}
-                placeholder={
-                  key === "name"
-                    ? "이름"
-                    : key === "affiliation"
-                    ? "소속"
-                    : key === "entry"
-                    ? "입실일 (예: YYYY-MM-DD)"
-                    : key === "exit"
-                    ? "퇴실일 (예: YYYY-MM-DD)"
-                    : key === "contact"
-                    ? "연락처 (예: 010-1234-5678)"
-                    : key === "guardian"
-                    ? "보호자 연락처 (예: 010-1234-5678)"
-                    : key
-                }
-                style={{
-                  marginBottom: 8,
-                  padding: 6,
-                  width: "100%",
-                  boxSizing: "border-box",
-                }}
-              />
-            ))}
+            <input placeholder="이름" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={{ width: "100%", marginBottom: 6 }} />
+            <input placeholder="소속" value={form.affiliation} onChange={(e) => setForm({ ...form, affiliation: e.target.value })} style={{ width: "100%", marginBottom: 6 }} />
+            <input placeholder="입실일 (YYYY-MM-DD)" value={form.entry} onChange={(e) => setForm({ ...form, entry: e.target.value })} style={{ width: "100%", marginBottom: 6 }} />
+            <input placeholder="퇴실일 (YYYY-MM-DD)" value={form.exit} onChange={(e) => setForm({ ...form, exit: e.target.value })} style={{ width: "100%", marginBottom: 6 }} />
+            <input placeholder="연락처" value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} style={{ width: "100%", marginBottom: 6 }} />
+            <input placeholder="보호자 연락처" value={form.guardian} onChange={(e) => setForm({ ...form, guardian: e.target.value })} style={{ width: "100%", marginBottom: 6 }} />
             <div style={{ textAlign: "right" }}>
               <button onClick={handleSave}>저장</button>
             </div>
@@ -239,10 +188,5 @@ export default function App() {
     </div>
   );
 }
-
-
-
-
-
 
 
